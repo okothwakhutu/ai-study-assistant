@@ -1,6 +1,6 @@
 import streamlit as st
 import fitz  # PyMuPDF
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import T5Tokenizer, T5ForConditionalGeneration, AutoTokenizer, AutoModelForSeq2SeqLM
 import re
 
 # --------------------------------------------
@@ -15,30 +15,42 @@ def extract_text_from_pdf(pdf_file):
     doc.close()
     return text
 
-def preprocess_text(text, max_chars=3000):
-    """Truncate text to avoid token limits (most models handle ~1024 tokens)."""
+def preprocess_text(text, max_chars=2500):
+    """Truncate text to avoid token limits."""
     return text[:max_chars] if len(text) > max_chars else text
 
 # --------------------------------------------
-# 2. Summarization (using DistilBART)
+# 2. Summarization (T5-small - FAST)
 # --------------------------------------------
-@st.cache_resource  # Load model only once
+@st.cache_resource
 def load_summarizer():
-    return pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+    model_name = "t5-small"
+    tokenizer = T5Tokenizer.from_pretrained(model_name)
+    model = T5ForConditionalGeneration.from_pretrained(model_name)
+    return tokenizer, model
 
-def summarize_text(text, max_length=150, min_length=50):
-    summarizer = load_summarizer()
-    # The model expects <= 1024 tokens; we preprocess to 3000 chars (approx 750 tokens)
-    truncated = preprocess_text(text, 3000)
-    summary = summarizer(truncated, max_length=max_length, min_length=min_length, do_sample=False)
-    return summary[0]['summary_text']
+def summarize_text(text, max_length=120, min_length=40):
+    tokenizer, model = load_summarizer()
+    truncated = preprocess_text(text, 2500)
+    input_text = "summarize: " + truncated
+    inputs = tokenizer.encode(input_text, return_tensors="pt", max_length=512, truncation=True)
+    outputs = model.generate(
+        inputs,
+        max_length=max_length,
+        min_length=min_length,
+        num_beams=2,
+        early_stopping=True,
+        no_repeat_ngram_size=3
+    )
+    summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return summary
 
 # --------------------------------------------
-# 3. Quiz Generation (using T5 for question generation)
+# 3. Quiz Generation (valhalla/t5-small-qg-hl - WORKING)
 # --------------------------------------------
 @st.cache_resource
 def load_qg_model():
-    model_name = "mrm8488/t5-base-finetuned-question-generation"
+    model_name = "valhalla/t5-small-qg-hl"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
     return tokenizer, model
@@ -51,37 +63,36 @@ def generate_questions(context, num_questions=3):
     sentences = [s.strip() for s in sentences if len(s.split()) > 5]
     
     questions = []
-    # Take the first few sentences that are long enough
     for sent in sentences[:num_questions*2]:
-        # Format for T5: "generate questions: <sentence>"
-        input_text = f"generate question: {sent}"
-        inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True)
+        # The model expects "question: <sentence>"
+        input_text = f"question: {sent}"
+        inputs = tokenizer.encode(input_text, return_tensors="pt", max_length=512, truncation=True)
         outputs = model.generate(
-            inputs.input_ids, 
+            inputs, 
             max_length=64, 
             num_beams=4, 
             early_stopping=True
         )
         question = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # The answer is the original sentence (simplistic but usable)
+        # Clean up question if it contains extra text
+        if question.startswith("question:"):
+            question = question.replace("question:", "").strip()
         questions.append({"question": question, "answer": sent})
         if len(questions) >= num_questions:
             break
     return questions
 
 # --------------------------------------------
-# 4. Study Plan (rules-based, using key sentences)
+# 4. Study Plan (rules-based)
 # --------------------------------------------
 def extract_topics(text, num_topics=5):
-    """Extract important sentences as pseudo-topics (simple TF‑IDF can be added)."""
+    """Extract important sentences as pseudo-topics."""
     sentences = re.split(r'(?<=[.!?])\s+', text)
-    # Remove very short sentences
     sentences = [s.strip() for s in sentences if len(s.split()) >= 5]
-    # Return first 'num_topics' sentences as topics
     return sentences[:num_topics]
 
 def create_study_plan(topics, days=5):
-    """Assign topics to days, with some repetition."""
+    """Assign topics to days."""
     if not topics:
         return ["No topics could be extracted. Please provide more detailed notes."]
     plan = []
@@ -116,22 +127,20 @@ if document_text:
     # ---------- SUMMARY ----------
     st.subheader("📌 Summary")
     if st.button("Generate Summary"):
-        with st.spinner("Summarizing... (may take 10-15 seconds)"):
-            summary = summarize_text(document_text)
+        short_text = document_text[:2500] if len(document_text) > 2500 else document_text
+        with st.spinner("Summarizing... (10-20 seconds on CPU)"):
+            summary = summarize_text(short_text)
         st.write(summary)
-        # Store summary for later steps
         st.session_state["summary"] = summary
     else:
-        summary = st.session_state.get("summary", "")
-        if summary:
-            st.write(summary)
+        if "summary" in st.session_state:
+            st.write(st.session_state["summary"])
     
     # ---------- QUIZ ----------
     st.subheader("❓ Quiz Generator")
     if st.button("Create Quiz (3 questions)"):
-        # Use the original text (or summary) as context
-        context = document_text if len(document_text) < 2000 else document_text[:2000]
-        with st.spinner("Generating questions using AI..."):
+        context = document_text[:2000] if len(document_text) > 2000 else document_text
+        with st.spinner("Generating questions using AI... (first run downloads model ~300 MB)"):
             quiz = generate_questions(context, num_questions=3)
         st.session_state["quiz"] = quiz
         for i, qa in enumerate(quiz, 1):
@@ -160,4 +169,4 @@ if document_text:
                 st.write(f"- {step}")
 
 st.markdown("---")
-st.caption("Powered by Hugging Face Transformers (DistilBART & T5). Models run locally – your data stays private.")
+st.caption("Powered by Hugging Face Transformers (T5-small & valhalla/t5-small-qg-hl). Models run locally – your data stays private.")
