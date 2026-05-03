@@ -166,9 +166,6 @@ Project Link: https://github.com/okothwakhutu/ai-study-assistant
 
 ⭐️ If this helped you, give the repository a star!
 
-text
-
-**Pro tip:** Replace the placeholder screenshot URL with an actual image after you run the app once. Take a screenshot of the Streamlit UI and upload it to your GitHub repo (e.g., `screenshot.png`), then change the markdown link to `![Demo screenshot](screenshot.png)`.  
 
 Also, create a `requirements.txt` for easier installation:
 streamlit>=1.28.0
